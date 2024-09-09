@@ -22,8 +22,6 @@ defaults: &defaults
 
 orbs:
   slack: circleci/slack@3.4.2
-
-
 job_environments:
   common_environment: &common_environment
     APP_HOSTPATH: usa
@@ -61,6 +59,7 @@ job_environments:
     MIN_REPLICA_COUNT: 2
     WP_DB_NAME: planet4-usa_wordpress_master
     WP_STATELESS_BUCKET: planet4-usa-stateless
+
 
 commands:
   approve_job:
