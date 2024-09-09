@@ -1,0 +1,561 @@
+---
+version: 2.1
+
+parameters:
+  rollback:
+    type: boolean
+    default: false
+
+  run_develop:
+    default: true
+    type: boolean
+
+docker_auth: &docker_auth
+  username: $DOCKERHUB_USERNAME
+  password: $DOCKERHUB_PASSWORD
+
+defaults: &defaults
+  docker:
+    - image: greenpeaceinternational/p4-builder:latest
+      auth:
+        <<: *docker_auth
+
+orbs:
+  slack: circleci/slack@3.4.2
+
+
+job_environments:
+  common_environment: &common_environment
+    APP_HOSTPATH: usa
+    CONTAINER_PREFIX: planet4-usa
+    WP_DB_NAME_PREFIX: planet4-usa_wordpress
+  develop_environment: &develop_environment
+    APP_ENVIRONMENT: development
+    APP_HOSTNAME: www-dev.greenpeace.org
+    CLOUDSQL_INSTANCE: p4-develop-k8s
+    GOOGLE_PROJECT_ID: planet-4-151612
+    GCLOUD_CLUSTER: p4-development
+    HELM_NAMESPACE: usa-development
+    HELM_RELEASE: planet4-usa
+    WP_DB_NAME: planet4-usa_wordpress_develop
+    WP_STATELESS_BUCKET: planet4-usa-stateless-develop
+  release_build_env: &release_build_env
+    GOOGLE_PROJECT_ID: planet4-production
+  release_environment: &release_environment
+    APP_ENVIRONMENT: staging
+    APP_HOSTNAME: www-stage.greenpeace.org
+    CLOUDSQL_INSTANCE: planet4-prod
+    GCLOUD_CLUSTER: planet4-production
+    GOOGLE_PROJECT_ID: planet4-production
+    HELM_NAMESPACE: usa-staging
+    HELM_RELEASE: planet4-usa-release
+    WP_DB_NAME: planet4-usa_wordpress_release
+    WP_STATELESS_BUCKET: planet4-usa-stateless-release
+  production_environment: &production_environment
+    APP_HOSTNAME: www-prod.greenpeace.org
+    CLOUDSQL_INSTANCE: planet4-prod
+    GCLOUD_CLUSTER: planet4-production
+    GOOGLE_PROJECT_ID: planet4-production
+    HELM_NAMESPACE: usa
+    HELM_RELEASE: planet4-usa-master
+    MIN_REPLICA_COUNT: 2
+    WP_DB_NAME: planet4-usa_wordpress_master
+    WP_STATELESS_BUCKET: planet4-usa-stateless
+
+commands:
+  approve_job:
+    description: "Approve an on-hold job."
+    parameters:
+      job_name:
+        type: string
+    steps:
+      - run:
+          name: Unhold job "<< parameters.job_name >>"
+          command: |
+            if [ -f /tmp/workspace/approve_workflow ]; then
+              WORKFLOW_ID=$(cat /tmp/workspace/approve_workflow)
+              url="https://circleci.com/api/v2/workflow/$WORKFLOW_ID/job"
+
+              # Get workflow details
+              workflow=$(curl -s -u "${CIRCLE_TOKEN}": -X GET --header "Content-Type: application/json" "$url")
+              echo $workflow
+              # Get approval job id
+              job_id=$(echo "$workflow" | jq -r '.items[] | select(.name=="<< parameters.job_name >>") | .approval_request_id ')
+              echo $job_id
+
+              if [[ -z $job_id ]]; then
+                echo "Approval ID not found"
+                exit 1
+              fi
+
+              echo "Approving << parameters.job_name >> for workflow $url"
+              echo "Job ID: ${job_id}"
+              curl \
+                --header "Content-Type: application/json" \
+                -u "${CIRCLE_TOKEN}:" \
+                -X POST \
+                "https://circleci.com/api/v2/workflow/${CIRCLE_WORKFLOW_ID}/approve/${job_id}"
+            fi
+
+job_definitions:
+  build_steps: &build_steps
+    working_directory: ~/
+    steps:
+      - setup_remote_docker:
+          docker_layer_caching: false
+      - run: |
+          if [[ -d source/cache ]]; then ls -al source/cache; fi
+      - run: activate-gcloud-account.sh
+      - run: mkdir -p /tmp/workspace/var /tmp/workspace/src
+      - run: echo "${CIRCLE_BUILD_NUM}" > /tmp/workspace/var/circle-build-num
+      - run: make test
+      - run: make rewrite
+      - run: make checkout
+      - run: make rewrite-app-repos
+      - run: make copy
+      - run: make bake
+      - run: make persist
+      - run: make build
+      - run: make push
+      - persist_to_workspace:
+          root: /tmp/workspace
+          paths:
+            - var
+            - src
+
+  deploy_steps: &deploy_steps
+    working_directory: ~/
+    parameters:
+      notify:
+        type: boolean
+        default: false
+      is_prod:
+        type: boolean
+        default: false
+    steps:
+      - checkout:
+          path: /home/circleci/checkout
+      - attach_workspace:
+          at: /tmp/workspace
+      - run: activate-gcloud-account.sh
+      - run: make prepare-helm
+      - run: make backup
+      - run: BUILD_TAG=build-$(cat /tmp/workspace/var/circle-build-num) make deploy-helm
+      - run: make post-deploy
+      - run:
+          name: Extract workflow from commit message
+          command: |
+            UNHOLD_WORKFLOW_LINE=$(git --git-dir=/home/circleci/checkout/.git log --format=%B -n 1 "$CIRCLE_SHA1" | { grep '^\/unhold ' || true; } )
+            echo "line $UNHOLD_WORKFLOW_LINE"
+            if [[ -n $UNHOLD_WORKFLOW_LINE ]]; then
+              WORKFLOW_ID=${UNHOLD_WORKFLOW_LINE#"/unhold "}
+              echo "$WORKFLOW_ID"
+              echo $WORKFLOW_ID > /tmp/workspace/approve_workflow
+            fi
+      - approve_job:
+          job_name: instance-ready
+      - when:
+          condition: << parameters.is_prod >>
+          steps:
+            - run: echo $CIRCLE_WORKFLOW_ID > /tmp/workspace/approve_workflow
+            - approve_job:
+                job_name: rollback-staging
+      - when:
+          condition: << parameters.notify >>
+          steps:
+            # Notify p4-activity-ci
+            - slack/status:
+                channel: C015MQGG3KQ
+                webhook: ${SLACK_NRO_WEBHOOK}
+  finish_staging_steps: &finish_staging_steps
+    working_directory: ~/
+    steps:
+      - attach_workspace:
+          at: /tmp/workspace
+      - run: activate-gcloud-account.sh
+      - run:
+          name: Get hold-production status
+          command: |
+            url="https://circleci.com/api/v2/workflow/$CIRCLE_WORKFLOW_ID/job"
+            workflow=$(curl -s -u "${CIRCLE_TOKEN}": -X GET --header "Content-Type: application/json" "$url")
+            echo "$workflow" | jq -r '.items[] | select(.name=="hold-production") | .status ' >/tmp/workspace/prod_status
+      - run:
+          name: Rollback if production wasn't approved
+          command: |
+            if [ $(cat /tmp/workspace/prod_status) == 'success' ]; then
+              echo "No need to rollback, production deploy was initiated so staging should stay at this version."
+              exit 0;
+            fi
+            make rollback
+  rollback_steps: &rollback_steps
+    working_directory: ~/
+    steps:
+      - run: activate-gcloud-account.sh
+      - run: mkdir -p /tmp/workspace/var /tmp/workspace/src
+      - run: make checkout
+      - run: make copy
+      - run: make persist
+      - run: BUILD_TAG="${CIRCLE_TAG}" make deploy
+
+  rollback_db_steps: &rollback_db_steps
+    working_directory: /tmp/workspace/src
+    steps:
+      - checkout
+      - run:
+          name: Configure
+          command: activate-gcloud-account.sh
+      - run:
+          name: Get keys
+          command: echo $SQLPROXY_KEY | base64 -d > key.json
+      - run:
+          name: Restore database
+          command: restore_db.sh
+          no_output_timeout: 20m
+
+jobs:
+  build-develop:
+    <<: *defaults
+    environment:
+      <<: *common_environment
+      <<: *develop_environment
+    <<: *build_steps
+
+  deploy-develop:
+    <<: *defaults
+    environment:
+      <<: *common_environment
+      <<: *develop_environment
+    <<: *deploy_steps
+
+  visualtests-reference:
+    environment:
+      <<: *common_environment
+      <<: *release_environment
+    docker:
+      - image: greenpeaceinternational/planet4-backstop:latest
+        auth:
+          <<: *docker_auth
+    working_directory: /src
+    steps:
+      - run: ./checkout.sh
+      - run: ./mergescenarios.sh
+      - run: mkdir /app/ -p
+      - run: ./makehistory.sh
+      - store_artifacts:
+          path: /app/backstop_data
+      - persist_to_workspace:
+          root: /app
+          paths:
+            - backstop_data
+
+  visualtests-compare:
+    environment:
+      <<: *common_environment
+      <<: *release_environment
+    docker:
+      - image: greenpeaceinternational/planet4-backstop:latest
+        auth:
+          <<: *docker_auth
+    working_directory: /src
+    parameters:
+      notify:
+        type: boolean
+        default: false
+    steps:
+      - run: ./checkout.sh
+      - run: ./mergescenarios.sh
+      - run: mkdir /app/ -p
+      - attach_workspace:
+          at: /app
+      - run: ./makecomparison.sh
+      - store_test_results:
+          path: /app/backstop_data
+      - store_artifacts:
+          path: /app/backstop_data
+      - slack/status:
+          fail_only: true
+          channel: C015MQGG3KQ
+          webhook: ${SLACK_NRO_WEBHOOK}
+
+  build:
+    <<: *defaults
+    environment:
+      <<: *common_environment
+      <<: *release_build_env
+    <<: *build_steps
+
+  deploy-staging:
+    <<: *defaults
+    environment:
+      <<: *common_environment
+      <<: *release_environment
+    <<: *deploy_steps
+
+  finish-staging:
+    <<: *defaults
+    environment:
+      <<: *common_environment
+      <<: *release_environment
+    <<: *finish_staging_steps
+
+  rollback-staging:
+    <<: *defaults
+    environment:
+      <<: *common_environment
+      <<: *release_environment
+    <<: *rollback_steps
+  promote:
+    <<: *defaults
+    environment:
+      <<: *common_environment
+    working_directory: /tmp/workspace/src
+    steps:
+      - checkout
+      - run:
+          name: Approve promotion
+          command: promote-to-production.sh "${CIRCLE_WORKFLOW_ID}"
+
+  deploy-production:
+    <<: *defaults
+    environment:
+      <<: *common_environment
+      <<: *production_environment
+    <<: *deploy_steps
+
+  rollback-production:
+    <<: *defaults
+    environment:
+      <<: *common_environment
+      <<: *production_environment
+    <<: *rollback_steps
+
+  rollback-production-db:
+    <<: *defaults
+    environment:
+      <<: *common_environment
+      <<: *production_environment
+    <<: *rollback_db_steps
+
+  create-sync-sql:
+    <<: *defaults
+    environment:
+      <<: *common_environment
+      <<: *production_environment
+    working_directory: /tmp/workspace/src
+    steps:
+      - checkout
+      - attach_workspace:
+          at: /tmp/workspace
+      - run:
+          name: Configure
+          command: |
+            activate-gcloud-account.sh
+      - run: echo $SQLPROXY_KEY | base64 -d > key.json
+      - run: sql_create_sync_file.sh
+
+  sync-to-staging:
+    <<: *defaults
+    environment:
+      <<: *common_environment
+      <<: *release_environment
+    working_directory: /tmp/workspace/src
+    steps:
+      - checkout
+      - attach_workspace:
+          at: /tmp/workspace
+      - run:
+          name: Configure
+          command: activate-gcloud-account.sh
+      - run:
+          name: Get keys
+          command: echo $SQLPROXY_KEY | base64 -d > key.json
+      - run:
+          name: Sync staging site
+          command: sql_to_sync_site.sh release
+          no_output_timeout: 20m
+
+  sync-to-develop:
+    <<: *defaults
+    environment:
+      <<: *common_environment
+      <<: *develop_environment
+    working_directory: /tmp/workspace/src
+    steps:
+      - checkout
+      - attach_workspace:
+          at: /tmp/workspace
+      - run:
+          name: Configure
+          command: activate-gcloud-account.sh
+      - run:
+          name: Check sync flag
+          command: check-data-sync-flag.sh
+      - run:
+          name: Get keys
+          command: echo $SQLPROXY_KEY | base64 -d > key.json
+      - run:
+          name: Sync dev site
+          command: sql_to_sync_site.sh develop
+          no_output_timeout: 20m
+
+  notify-sync:
+    <<: *defaults
+    environment:
+      <<: *common_environment
+      <<: *develop_environment
+    working_directory: /tmp/workspace/src
+    steps:
+      - checkout
+      - run:
+          name: Configure
+          command: activate-gcloud-account.sh
+      - run:
+          name: Check sync flag
+          command: check-data-sync-flag.sh
+      - run:
+          name: Notify admins
+          command: notify-sync-admins.sh
+
+  backup:
+    docker:
+      - image: greenpeaceinternational/planet4-backup:latest
+        auth:
+          <<: *docker_auth
+    environment:
+      <<: *common_environment
+      <<: *production_environment
+    working_directory: /app
+    steps:
+      - run: echo "backup is running"
+      - run: pwd
+      - run: ls
+      - run: ./go.sh
+
+workflow_definitions:
+  on_develop_commit: &on_develop_commit
+    context: org-global
+    filters:
+      branches:
+        only: main
+  on_release_tag: &on_release_tag
+    context: org-global
+    filters:
+      branches:
+        ignore: /.*/
+      tags:
+        only: /^v.*/
+
+workflows:
+  develop:
+    when: << pipeline.parameters.run_develop >>
+    jobs:
+      - build-develop:
+          <<: *on_develop_commit
+      - deploy-develop:
+          <<: *on_develop_commit
+          requires:
+            - build-develop
+  production:
+    unless: << pipeline.parameters.rollback >>
+    jobs:
+      - visualtests-reference:
+          <<: *on_release_tag
+      - build:
+          <<: *on_release_tag
+      - deploy-staging:
+          <<: *on_release_tag
+          requires:
+            - build
+            - visualtests-reference
+      - visualtests-compare:
+          <<: *on_release_tag
+          notify: true
+          requires:
+            - deploy-staging
+      - rollback-staging:
+          <<: *on_release_tag
+          type: approval
+          requires:
+            - deploy-staging
+      - finish-staging:
+          <<: *on_release_tag
+          requires:
+            - rollback-staging
+      - hold-production:
+          <<: *on_release_tag
+          type: approval
+          requires:
+            - deploy-staging
+      - deploy-production:
+          <<: *on_release_tag
+          notify: true
+          is_prod: true
+          requires:
+            - hold-production
+  rollback:
+    when: << pipeline.parameters.rollback >>
+    jobs:
+      - rollback-staging:
+          <<: *on_release_tag
+      - hold-production:
+          <<: *on_release_tag
+          type: approval
+          requires:
+            - rollback-staging
+      - hold-production-db:
+          <<: *on_release_tag
+          type: approval
+          requires:
+            - rollback-staging
+      - rollback-production:
+          <<: *on_release_tag
+          requires:
+            - hold-production
+      - rollback-production-db:
+          <<: *on_release_tag
+          requires:
+            - hold-production-db
+
+  sync-from-production:
+    triggers:
+      - schedule:
+          cron: "10 01 1 * *"
+          filters:
+            branches:
+              only:
+                - main
+    jobs:
+      - create-sync-sql:
+          context: org-global
+      - sync-to-staging:
+          context: org-global
+          requires:
+            - create-sync-sql
+      - sync-to-develop:
+          context: org-global
+          requires:
+            - create-sync-sql
+
+  notify-sync:
+    triggers:
+      - schedule:
+          cron: "10 02 28 * *"
+          filters:
+            branches:
+              only:
+                - main
+    jobs:
+      - notify-sync:
+          context: org-global
+
+  backup:
+    triggers:
+      - schedule:
+          cron: "30 02 * * *"
+          filters:
+            branches:
+              only:
+                - main
+    jobs:
+      - backup:
+          context: org-global
