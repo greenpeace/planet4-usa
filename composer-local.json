@@ -3,7 +3,7 @@
   "description": "Greenpeace Planet 4",
   "license": "MIT",
   "require": {
-    "greenpeace/planet4-child-theme-usa": "dev-PLANET-7666_apply-subscription-form-on-footer",
+    "greenpeace/planet4-child-theme-usa": "dev-main",
     "wpackagist-plugin/optinmonster": "2.16.9"
   },
   "scripts": {
