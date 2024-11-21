@@ -4,7 +4,8 @@
   "license": "MIT",
   "require": {
     "greenpeace/planet4-child-theme-usa": "dev-main",
-    "wpackagist-plugin/optinmonster": "2.16.9"
+    "wpackagist-plugin/optinmonster": "2.16.*",
+    "wpackagist-plugin/wordpress-seo": "18.1.*"
   },
   "scripts": {
     "install:plugin-wpimport": "wp plugin install --activate https://storage.googleapis.com/planet4-3rdparty-plugins/wp-all-import-pro_4.8.5.zip",
