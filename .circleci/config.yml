@@ -27,9 +27,6 @@ job_environments:
     APP_HOSTPATH: usa
     CONTAINER_PREFIX: planet4-usa
     WP_DB_NAME_PREFIX: planet4-usa_wordpress
-    MIN_REPLICA_COUNT: 1
-    MAX_REPLICA_COUNT: 1
-    PARENT_VERSION: max_execution_time
   develop_environment: &develop_environment
     APP_ENVIRONMENT: development
     APP_HOSTNAME: www-dev.greenpeace.org
@@ -53,12 +50,13 @@ job_environments:
     WP_DB_NAME: planet4-usa_wordpress_release
     WP_STATELESS_BUCKET: planet4-usa-stateless-release
   production_environment: &production_environment
-    APP_HOSTNAME: www-prod.greenpeace.org
+    APP_HOSTNAME: www.greenpeace.org
     CLOUDSQL_INSTANCE: planet4-prod
     GCLOUD_CLUSTER: planet4-production
     GOOGLE_PROJECT_ID: planet4-production
     HELM_NAMESPACE: usa
     HELM_RELEASE: planet4-usa-master
+    MIN_REPLICA_COUNT: 2
     WP_DB_NAME: planet4-usa_wordpress_master
     WP_STATELESS_BUCKET: planet4-usa-stateless
 
