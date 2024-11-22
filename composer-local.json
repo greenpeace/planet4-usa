@@ -9,8 +9,10 @@
   },
   "scripts": {
     "install:plugin-wpimport": "wp plugin install --activate https://storage.googleapis.com/planet4-3rdparty-plugins/wp-all-import-pro_4.8.5.zip",
+    "install:plugin-yoast-seo": "wp plugin install --activate https://storage.googleapis.com/planet4-3rdparty-plugins/wordpress-seo-premium-23.9.zip",
     "site:custom" : [
-      "@install:plugin-wpimport"
+      "@install:plugin-wpimport",
+      "@install:plugin-yoast-seo"
     ]
   }
 }
