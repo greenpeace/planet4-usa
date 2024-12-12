@@ -6,7 +6,7 @@
     "greenpeace/planet4-child-theme-usa": "dev-main",
     "wpackagist-plugin/optinmonster": "2.16.*",
     "wpackagist-plugin/wordpress-seo": "23.9.*",
-    "wpackagist-plugin/crazyegg-integrator-for-wordpress": "1.0.*",
+    "wpackagist-plugin/crazyegg-heatmap-tracking": "2.12.*",
     "wpackagist-plugin/hotjar": "1.0.*"
   },
   "scripts": {
