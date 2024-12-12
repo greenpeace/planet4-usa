@@ -3,7 +3,7 @@
   "description": "Greenpeace Planet 4",
   "license": "MIT",
   "require": {
-    "greenpeace/planet4-child-theme-usa": "dev-fix-broken-links",
+    "greenpeace/planet4-child-theme-usa": "dev-main",
     "wpackagist-plugin/optinmonster": "2.16.*",
     "wpackagist-plugin/wordpress-seo": "23.9.*",
     "wpackagist-plugin/crazyegg-integrator-for-wordpress": "1.0.*",
